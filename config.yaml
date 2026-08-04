@@ -9,7 +9,7 @@ esp32:
 
 external_components:
   - source: github://kemak92/eth_wifi_fallback_ap@main
-    components: [eth_wifi_fallback_ap]
+    components: [eth_wifi_fallback]
     refresh: 0s
 
 # ====================== ETHERNET (Primary) ======================
