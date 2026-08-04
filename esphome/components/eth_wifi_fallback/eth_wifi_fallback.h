@@ -3,6 +3,8 @@
 //
 // Ethernet primary → WiFi STA → WiFi AP fallback with Dynamic NVS WiFi Config.
 // by @kemak92 - heungelectric, 2026
+//
+// + /wifi web page (SSID + Password form, scan, save to NVS)
 
 #pragma once
 
@@ -16,6 +18,10 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
+#include "esp_http_server.h"
+
+#include <vector>
+#include <string>
 
 namespace esphome {
 namespace eth_wifi_fallback {
@@ -32,6 +38,12 @@ enum class FallbackState {
 struct WifiCredentials {
   char ssid[33];
   char password[65];
+};
+
+struct ScanResult {
+  std::string ssid;
+  int8_t rssi;
+  uint8_t authmode;  // wifi_auth_mode_t
 };
 
 class EthWifiFallback : public Component {
@@ -84,6 +96,11 @@ class EthWifiFallback : public Component {
 
   ESPPreferenceObject pref_creds_;
 
+  // HTTP server for /wifi page
+  httpd_handle_t http_server_{nullptr};
+  bool scan_in_progress_{false};
+  std::vector<ScanResult> scan_results_;
+
   void load_credentials_();
   void ensure_wifi_init_();
   void start_sta_();
@@ -93,6 +110,19 @@ class EthWifiFallback : public Component {
   void log_sta_ip_();
   std::string get_effective_ap_ssid_();
   std::string get_effective_ap_password_();
+
+  // Web server
+  void start_http_server_();
+  void stop_http_server_();
+  void start_scan_();
+  void collect_scan_results_();
+  static esp_err_t handle_root_(httpd_req_t *req);
+  static esp_err_t handle_wifi_get_(httpd_req_t *req);
+  static esp_err_t handle_wifi_post_(httpd_req_t *req);
+  static esp_err_t handle_scan_(httpd_req_t *req);
+  static esp_err_t handle_clear_(httpd_req_t *req);
+  std::string build_wifi_page_html_();
+  static EthWifiFallback *instance_;  // for static handlers
 };
 
 template<typename... Ts> class SaveWifiAction : public Action<Ts...> {
