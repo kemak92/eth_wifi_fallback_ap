@@ -60,7 +60,8 @@ def ip_to_uint32(ip):
 
 async def to_code(config):
     # SoftAP needs DHCP server. ESPHome disables it by default when wifi: is absent.
-    if CORE.is_esp32 and CORE.using_esp_idf:
+    # ESPHome 2026.1+: CORE.using_esp_idf removed — use CORE.is_esp32
+    if CORE.is_esp32:
         from esphome.components.esp32 import add_idf_sdkconfig_option
         add_idf_sdkconfig_option("CONFIG_LWIP_DHCPS", True)
         add_idf_sdkconfig_option("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", True)
@@ -94,6 +95,7 @@ async def to_code(config):
         cv.Required(CONF_SSID): cv.templatable(cv.string),
         cv.Required(CONF_PASSWORD): cv.templatable(cv.string),
     }),
+    synchronous=True,
 )
 async def save_wifi_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
@@ -107,6 +109,7 @@ async def save_wifi_to_code(config, action_id, template_arg, args):
     "eth_wifi_fallback.clear_wifi",
     ClearWifiAction,
     cv.Schema({cv.GenerateID(): cv.use_id(EthWifiFallback)}),
+    synchronous=True,
 )
 async def clear_wifi_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
