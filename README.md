@@ -28,12 +28,14 @@ esphome:
   friendly_name: ESP32 ETH WiFi Fallback
 
 esp32:
-  board: esp32dev
+  board: esp32dev          # board của bạn
   framework:
-    type: arduino
+    type: esp-idf
+    advanced:
+      enable_lwip_dhcp_server: true   # dự phòng nếu sdkconfig chưa ăn
 
 external_components:
-  - source: github://kemak92/eth_wifi_fallback@main
+  - source: github://kemak92/eth_wifi_fallback_ap@main
     components: [eth_wifi_fallback]
     refresh: 0s
 

@@ -2,6 +2,7 @@
 # https://github.com/kemak92/eth_wifi_fallback_ap
 #
 # Ethernet primary → WiFi STA → WiFi AP fallback with Dynamic NVS WiFi Config.
+# + /wifi web page (SSID + Password form, scan, save to NVS)
 # by @kemak92 - heungelectric, 2026
 
 import esphome.codegen as cg
@@ -17,6 +18,7 @@ from esphome.const import (
     CONF_DNS1,
 )
 from esphome.components import ethernet
+from esphome.core import CORE
 
 DEPENDENCIES = ["ethernet"]
 AUTO_LOAD = []
@@ -57,6 +59,12 @@ def ip_to_uint32(ip):
 
 
 async def to_code(config):
+    # SoftAP needs DHCP server. ESPHome disables it by default when wifi: is absent.
+    if CORE.is_esp32 and CORE.using_esp_idf:
+        from esphome.components.esp32 import add_idf_sdkconfig_option
+        add_idf_sdkconfig_option("CONFIG_LWIP_DHCPS", True)
+        add_idf_sdkconfig_option("CONFIG_ESP_WIFI_SOFTAP_SUPPORT", True)
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_ssid(config[CONF_SSID]))

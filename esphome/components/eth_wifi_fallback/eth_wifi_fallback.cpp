@@ -106,14 +106,13 @@ void EthWifiFallback::loop() {
         ESP_LOGI(TAG, "WiFi STA connected");
         this->log_sta_ip_();
         this->state_ = FallbackState::STA_ACTIVE;
-        // Keep HTTP server running so /wifi is still reachable over STA
         this->start_http_server_();
       } else if (now - this->state_enter_time_ > this->sta_timeout_) {
         ESP_LOGW(TAG, "STA timeout → starting AP");
         this->stop_wifi_();
-        this->state_ = FallbackState::STARTING_AP;
+        this->state_ = FallbackState::AP_ACTIVE;
         this->state_enter_time_ = now;
-        this->start_ap_();
+        this->start_ap_();  // starts AP + DHCP + HTTP + scan immediately
       } else {
         esp_wifi_connect();
       }
@@ -130,9 +129,8 @@ void EthWifiFallback::loop() {
       break;
 
     case FallbackState::STARTING_AP:
+      // Should not linger here; start_ap_ already sets AP_ACTIVE
       this->state_ = FallbackState::AP_ACTIVE;
-      this->start_http_server_();
-      this->start_scan_();  // auto-scan when AP starts
       break;
 
     case FallbackState::AP_ACTIVE:
@@ -217,14 +215,20 @@ void EthWifiFallback::start_sta_() {
 
 void EthWifiFallback::start_ap_() {
   this->ensure_wifi_init_();
+
+  // Need both netifs for APSTA (scan requires STA interface)
   if (this->ap_netif_ == nullptr)
     this->ap_netif_ = esp_netif_create_default_wifi_ap();
+  if (this->sta_netif_ == nullptr)
+    this->sta_netif_ = esp_netif_create_default_wifi_sta();
 
   const std::string ap_ssid = this->get_effective_ap_ssid_();
   const std::string ap_pass = this->get_effective_ap_password_();
   const bool auto_pass = this->ap_password_.empty();
 
-  esp_wifi_set_mode(WIFI_MODE_AP);
+  // APSTA: keep AP up while allowing scan on STA interface
+  esp_wifi_set_mode(WIFI_MODE_APSTA);
+
   wifi_config_t cfg = {};
   strncpy((char *) cfg.ap.ssid, ap_ssid.c_str(), sizeof(cfg.ap.ssid) - 1);
   strncpy((char *) cfg.ap.password, ap_pass.c_str(), sizeof(cfg.ap.password) - 1);
@@ -232,9 +236,30 @@ void EthWifiFallback::start_ap_() {
   cfg.ap.channel = 1;
   cfg.ap.max_connection = 4;
   cfg.ap.authmode = (ap_pass.length() >= 8) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+  cfg.ap.beacon_interval = 100;
 
   esp_wifi_set_config(WIFI_IF_AP, &cfg);
   esp_wifi_start();
+
+  // Ensure AP has 192.168.4.1 and DHCP server is running
+  if (this->ap_netif_ != nullptr) {
+    esp_netif_dhcps_stop(this->ap_netif_);
+
+    esp_netif_ip_info_t ip_info = {};
+    // 192.168.4.1 / 255.255.255.0
+    ip_info.ip.addr = htonl(0xC0A80401);
+    ip_info.gw.addr = htonl(0xC0A80401);
+    ip_info.netmask.addr = htonl(0xFFFFFF00);
+    esp_netif_set_ip_info(this->ap_netif_, &ip_info);
+
+    esp_err_t dhcps_err = esp_netif_dhcps_start(this->ap_netif_);
+    if (dhcps_err != ESP_OK) {
+      ESP_LOGE(TAG, "DHCP server start failed: %s", esp_err_to_name(dhcps_err));
+      ESP_LOGE(TAG, "→ Clean rebuild with enable_lwip_dhcp_server: true (see YAML)");
+    } else {
+      ESP_LOGI(TAG, "DHCP server started on 192.168.4.1");
+    }
+  }
 
   ESP_LOGW(TAG, "========== RESCUE AP ==========");
   ESP_LOGW(TAG, "SSID: %s", ap_ssid.c_str());
@@ -242,6 +267,10 @@ void EthWifiFallback::start_ap_() {
   ESP_LOGW(TAG, "IP:   192.168.4.1");
   ESP_LOGW(TAG, "URL:  http://192.168.4.1/wifi");
   ESP_LOGW(TAG, "================================");
+
+  // Start web UI immediately (do not wait for next check_interval)
+  this->start_http_server_();
+  // Scan will be triggered from the /wifi page button (more reliable after AP is up)
 }
 
 void EthWifiFallback::stop_wifi_() {
@@ -336,18 +365,24 @@ void EthWifiFallback::start_scan_() {
   this->scan_in_progress_ = true;
   this->scan_results_.clear();
 
+  // Ensure APSTA so scan works while AP stays up
+  wifi_mode_t mode;
+  if (esp_wifi_get_mode(&mode) == ESP_OK && mode != WIFI_MODE_APSTA && mode != WIFI_MODE_STA) {
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+  }
+
   wifi_scan_config_t scan_cfg = {};
   scan_cfg.ssid = nullptr;
   scan_cfg.bssid = nullptr;
   scan_cfg.channel = 0;
   scan_cfg.show_hidden = true;
   scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-  scan_cfg.scan_time.active.min = 100;
+  scan_cfg.scan_time.active.min = 120;
   scan_cfg.scan_time.active.max = 300;
 
   esp_err_t err = esp_wifi_scan_start(&scan_cfg, false);  // async
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Scan start failed: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "Scan start failed: %s (try again in a few seconds)", esp_err_to_name(err));
     this->scan_in_progress_ = false;
     return;
   }
