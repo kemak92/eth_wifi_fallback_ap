@@ -261,16 +261,19 @@ void EthWifiFallback::start_ap_() {
     }
   }
 
+  // Start config portal (port 80 or fallback if web_server holds 80)
+  this->start_http_server_();
+
   ESP_LOGW(TAG, "========== RESCUE AP ==========");
   ESP_LOGW(TAG, "SSID: %s", ap_ssid.c_str());
   ESP_LOGW(TAG, "PASS: %s%s", ap_pass.c_str(), auto_pass ? " (auto from MAC)" : "");
   ESP_LOGW(TAG, "IP:   192.168.4.1");
-  ESP_LOGW(TAG, "URL:  http://192.168.4.1/wifi");
+  if (this->http_server_ != nullptr && this->http_port_ != 80) {
+    ESP_LOGW(TAG, "URL:  http://192.168.4.1:%u/", this->http_port_);
+  } else {
+    ESP_LOGW(TAG, "URL:  http://192.168.4.1/");
+  }
   ESP_LOGW(TAG, "================================");
-
-  // Start web UI immediately (do not wait for next check_interval)
-  this->start_http_server_();
-  // Scan will be triggered from the /wifi page button (more reliable after AP is up)
 }
 
 void EthWifiFallback::stop_wifi_() {
@@ -300,19 +303,46 @@ void EthWifiFallback::start_http_server_() {
   if (this->http_server_ != nullptr)
     return;
 
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-  config.max_uri_handlers = 8;
-  config.stack_size = 8192;
+  // Port 80 often taken by ESPHome web_server → try fallbacks
+  static const uint16_t k_ports[] = {80, 8080, 81, 8888};
+  esp_err_t err = ESP_FAIL;
+  for (uint16_t port : k_ports) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = port;
+    config.ctrl_port = 32768 + port;  // unique control port
+    config.max_uri_handlers = 10;
+    config.stack_size = 8192;
+    config.lru_purge_enable = true;
 
-  if (httpd_start(&this->http_server_, &config) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start HTTP server");
+    err = httpd_start(&this->http_server_, &config);
+    if (err == ESP_OK) {
+      this->http_port_ = port;
+      break;
+    }
     this->http_server_ = nullptr;
+    ESP_LOGW(TAG, "HTTP listen on :%u failed (%s), trying next…", port, esp_err_to_name(err));
+  }
+
+  if (this->http_server_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to start HTTP config server on any port");
     return;
   }
 
   httpd_uri_t uri_root = {
       .uri = "/",
+      .method = HTTP_GET,
+      .handler = handle_root_,
+      .user_ctx = this,
+  };
+  // Captive portal probes
+  httpd_uri_t uri_gen204 = {
+      .uri = "/generate_204",
+      .method = HTTP_GET,
+      .handler = handle_root_,
+      .user_ctx = this,
+  };
+  httpd_uri_t uri_hotspot = {
+      .uri = "/hotspot-detect.html",
       .method = HTTP_GET,
       .handler = handle_root_,
       .user_ctx = this,
@@ -343,12 +373,18 @@ void EthWifiFallback::start_http_server_() {
   };
 
   httpd_register_uri_handler(this->http_server_, &uri_root);
+  httpd_register_uri_handler(this->http_server_, &uri_gen204);
+  httpd_register_uri_handler(this->http_server_, &uri_hotspot);
   httpd_register_uri_handler(this->http_server_, &uri_wifi_get);
   httpd_register_uri_handler(this->http_server_, &uri_wifi_post);
   httpd_register_uri_handler(this->http_server_, &uri_scan);
   httpd_register_uri_handler(this->http_server_, &uri_clear);
 
-  ESP_LOGI(TAG, "HTTP server started → http://<ip>/wifi");
+  if (this->http_port_ == 80) {
+    ESP_LOGW(TAG, "Config portal: http://192.168.4.1/  (or /wifi)");
+  } else {
+    ESP_LOGW(TAG, "Config portal: http://192.168.4.1:%u/  (port 80 busy by web_server)", this->http_port_);
+  }
 }
 
 void EthWifiFallback::stop_http_server_() {
@@ -547,16 +583,15 @@ std::string EthWifiFallback::build_wifi_page_html_() {
 }
 
 esp_err_t EthWifiFallback::handle_root_(httpd_req_t *req) {
-  httpd_resp_set_status(req, "302 Found");
-  httpd_resp_set_hdr(req, "Location", "/wifi");
-  httpd_resp_send(req, nullptr, 0);
-  return ESP_OK;
+  // Serve config page directly (no redirect — avoids blank page on some phones)
+  return handle_wifi_get_(req);
 }
 
 esp_err_t EthWifiFallback::handle_wifi_get_(httpd_req_t *req) {
   auto *self = static_cast<EthWifiFallback *>(req->user_ctx);
   std::string page = self->build_wifi_page_html_();
-  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_send(req, page.c_str(), page.length());
   return ESP_OK;
 }

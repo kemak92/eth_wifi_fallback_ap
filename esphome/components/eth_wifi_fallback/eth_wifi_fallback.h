@@ -96,8 +96,9 @@ class EthWifiFallback : public Component {
 
   ESPPreferenceObject pref_creds_;
 
-  // HTTP server for /wifi page
+  // HTTP server for /wifi page (AP rescue only)
   httpd_handle_t http_server_{nullptr};
+  uint16_t http_port_{80};
   bool scan_in_progress_{false};
   std::vector<ScanResult> scan_results_;
 
