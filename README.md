@@ -1,45 +1,74 @@
-```markdown
 # eth_wifi_fallback
 
-ESPHome external component: **Ethernet primary + WiFi Client fallback**.
-
-Repository: https://github.com/kemak92/eth_wifi_fallback
+ESPHome external component: **Ethernet primary → WiFi STA fallback → WiFi AP rescue**  
+with **NVS WiFi credentials** and a **config web page** (AP mode only).
 
 by **@kemak92** — heungelectric, 2026
 
-Tested on **HEUNGELECTRIC** ESP32 + LAN8720 board.
+Tested on **HEUNGELECTRIC** ESP32 + LAN8720, ESPHome **2026.7.x** / ESP-IDF.
 
 ---
 
 ## Features
 
-- Ethernet as primary connection
-- Automatic WiFi Client (STA) when Ethernet is lost
-- Optional static IP for WiFi (can be the same as Ethernet)
-- Stops WiFi when Ethernet recovers
+| Feature | Description |
+|--------|-------------|
+| Ethernet primary | Preferred link when cable is up |
+| WiFi STA fallback | Connects to SSID from NVS (or YAML default) when Ethernet is lost |
+| WiFi AP rescue | SoftAP + config portal if STA fails |
+| NVS storage | Save / clear WiFi credentials without reflashing |
+| Config page | `http://192.168.4.1/` (or `:8080` if port 80 is taken by `web_server`) |
+| Security | Config HTTP **only** on rescue AP — not exposed on LAN when STA/ETH is up |
+| Actions | `eth_wifi_fallback.save_wifi` / `clear_wifi` for automations |
+
+**Flow**
+
+```
+Ethernet OK  →  use Ethernet, WiFi off
+Ethernet lost → try WiFi STA (NVS → else YAML ssid/password)
+STA OK       → use WiFi (API / OTA / web_server as usual)
+STA fail     → start rescue AP + config portal
+User saves   → credentials → NVS → switch to STA immediately
+Ethernet back → stop WiFi + portal
+```
 
 ---
 
-## Usage
+## Install
+
+```yaml
+external_components:
+  - source: github://kemak92/eth_wifi_fallback_ap@main
+    components: [eth_wifi_fallback]
+    refresh: 0s
+```
+
+**Requirements**
+
+- ESP32 + ESP-IDF (`framework: type: esp-idf`)
+- `ethernet:` component (this component does **not** use ESPHome `wifi:`)
+- DHCP server enabled for SoftAP (see YAML below)
+
+---
+
+## Minimal configuration
 
 ```yaml
 esphome:
-  name: "esp32-eth-wifi-fallback"
-  friendly_name: ESP32 ETH WiFi Fallback
+  name: heung-eth-fallback
 
 esp32:
-  board: esp32dev          # board của bạn
+  board: esp32dev
   framework:
     type: esp-idf
     advanced:
-      enable_lwip_dhcp_server: true   # dự phòng nếu sdkconfig chưa ăn
+      enable_lwip_dhcp_server: true   # required for rescue AP clients
 
 external_components:
   - source: github://kemak92/eth_wifi_fallback_ap@main
     components: [eth_wifi_fallback]
     refresh: 0s
 
-# ====================== ETHERNET (Primary) ======================
 ethernet:
   type: LAN8720
   mdc_pin: GPIO23
@@ -48,121 +77,227 @@ ethernet:
     pin: GPIO17
     mode: CLK_OUT
   phy_addr: 0
-  # power_pin: GPIO16
-
   manual_ip:
     static_ip: 192.168.1.150
     gateway: 192.168.1.1
     subnet: 255.255.255.0
     dns1: 192.168.1.1
-    dns2: 8.8.8.8
 
-# ====================== FALLBACK: STA → AP ======================
 eth_wifi_fallback:
-  id: my_fallback
-
-  # WiFi nhà (STA) — ưu tiên khi mất Ethernet
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  ssid: "YourHomeWiFi"          # default when NVS empty
+  password: "YourPassword"
+  sta_timeout: 45s              # wait for STA before opening AP
   check_interval: 15s
-  sta_timeout: 45s              # hết 45s không vào STA → bật AP
-
-  # IP cố định khi chạy STA (cùng IP Ethernet cũng được)
-  manual_ip:
+  # ap_ssid: "HEUNG-AP-XXXX"    # optional; default from MAC
+  # ap_password: "........"     # optional; ≥8 chars, else auto from MAC
+  manual_ip:                    # optional static IP on WiFi STA
     static_ip: 192.168.1.150
     gateway: 192.168.1.1
     subnet: 255.255.255.0
     dns1: 192.168.1.1
 
-  # AP cứu hộ — để trống = tự sinh theo MAC + in PASS ra log
-  # ap_ssid: "HEUNG-Rescue"
-  # ap_password: "matkhaumanh123"   # nếu set phải ≥ 8 ký tự
-
-# ====================== REST ======================
 logger:
-  level: INFO
+  level: DEBUG
 
 api:
-  encryption:
-    key: !secret api_key
-  reboot_timeout: 0s
+  reboot_timeout: 0s            # avoid reboot while switching links
 
 ota:
   - platform: esphome
-    password: !secret ota_password
 
+# Optional: dashboard when on ETH / STA (uses port 80)
+# Config portal then moves to :8080 automatically
 web_server:
   port: 80
-
-text_sensor:
-  - platform: ethernet_info
-    ip_address:
-      name: "IP Address (Ethernet)"
-    mac_address:
-      name: "MAC Address"
-
-sensor:
-  - platform: uptime
-    name: "Uptime"
-    update_interval: 60s
-
-# Nút trên HA / Web: xóa WiFi đã lưu NVS → về YAML default
-button:
-  - platform: template
-    name: "Reset WiFi to YAML default"
-    on_press:
-      - eth_wifi_fallback.clear_wifi:
-          id: my_fallback
-
-# Ví dụ đổi WiFi động (script / automation HA)
-# - eth_wifi_fallback.save_wifi:
-#     id: my_fallback
-#     ssid: "NewSSID"
-#     password: "NewPassword"
 ```
 
 ---
-## Configuration Options
+
+## Config portal (rescue AP)
+
+When STA cannot connect, the device starts SoftAP:
+
+| Item | Default |
+|------|---------|
+| SSID | `HEUNG-AP-XXXX` (last 2 bytes of MAC) |
+| Password | `heung_` + 8 hex digits from MAC |
+| IP | `192.168.4.1` |
+| URL | `http://192.168.4.1/` or `http://192.168.4.1:8080/` |
+
+Exact SSID / PASS / URL are printed in the log:
+
+```text
+========== RESCUE AP ==========
+SSID: HEUNG-AP-CC6C
+PASS: heung_efe7cc6c (auto from MAC)
+IP:   192.168.4.1
+URL:  http://192.168.4.1:8080/
+================================
+```
+
+**Phone tips**
+
+1. Turn **off mobile data** (or use Airplane mode + WiFi only).
+2. Join the rescue AP.
+3. Open the **URL from the log** (include port if not 80).
+4. Scan networks → choose SSID → enter password → **Save**.
+5. Device stores credentials in NVS and connects as STA.
+
+---
+
+## Options
 
 | Option | Required | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `ssid` | **yes** | — | Tên Wi-Fi mặc định trong file YAML[cite: 10] |
-| `password` | **yes** | — | Mật khẩu Wi-Fi mặc định trong file YAML[cite: 10] |
-| `sta_timeout` | no | `45s` | Thời gian chờ nối Wi-Fi trước khi tự bật Rescue AP[cite: 10] |
-| `ap_ssid` | no | Auto MAC | Tên Hotspot AP cứu hộ (Ví dụ: `HEUNG-AP-A1B2`)[cite: 8, 10] |
-| `ap_password` | no | Auto MAC | Mật khẩu Hotspot AP cứu hộ[cite: 8, 10] |
-| `check_interval` | no | `15s` | Chu kỳ kiểm tra tín hiệu dây cáp LAN[cite: 10] |
-| `manual_ip.static_ip` | conditional | — | IP cố định cho Wi-Fi (bắt buộc nếu dùng `manual_ip`)[cite: 10] |
-| `manual_ip.gateway` | conditional | — | Địa chỉ IP Gateway (bắt buộc nếu dùng `manual_ip`)[cite: 10] |
-| `manual_ip.subnet` | conditional | — | Subnet Mask (bắt buộc nếu dùng `manual_ip`)[cite: 10] |
-| `manual_ip.dns1` | no | — | Máy chủ DNS thứ nhất[cite: 10] |
+|--------|----------|---------|-------------|
+| `ssid` | yes | — | Default STA SSID if NVS empty |
+| `password` | yes | — | Default STA password |
+| `sta_timeout` | no | `45s` | Time to wait for STA before AP |
+| `check_interval` | no | `15s` | How often to check Ethernet |
+| `ap_ssid` | no | from MAC | Rescue AP SSID |
+| `ap_password` | no | from MAC | Rescue AP password (≥ 8 chars) |
+| `manual_ip.*` | no | DHCP | Static IP on WiFi STA |
 
+---
 
+## Automations: button & switch examples
 
-## Example logs (HEUNGELECTRIC board)
+### 1) Template button — clear NVS (back to YAML WiFi)
 
-Ethernet up → lost → WiFi fallback (same IP) → Ethernet recovered:
+```yaml
+button:
+  - platform: template
+    name: "Clear saved WiFi (NVS)"
+    icon: mdi:wifi-remove
+    on_press:
+      - eth_wifi_fallback.clear_wifi:
+```
 
-Khi vào AP (nhìn serial log)
-```text
-[W] SSID: HEUNG-AP-CC6C
-[W] PASS: heung_efe7cc6c (auto from MAC)
-[W] IP:   usually 192.168.4.1
-Điện thoại nối WiFi đó → mở http://192.168.4.1 (nếu có web_server).
+### 2) Template button — save fixed credentials
+
+```yaml
+button:
+  - platform: template
+    name: "Save factory WiFi"
+    icon: mdi:wifi-lock
+    on_press:
+      - eth_wifi_fallback.save_wifi:
+          ssid: "FactorySSID"
+          password: "FactoryPassword"
+```
+
+### 3) Physical button (GPIO) — clear NVS on long press
+
+```yaml
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0          # change to your button pin
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Config button"
+    filters:
+      - delayed_on: 50ms
+    on_click:
+      min_length: 3s
+      max_length: 10s
+      then:
+        - logger.log: "Clearing NVS WiFi credentials"
+        - eth_wifi_fallback.clear_wifi:
+```
+
+### 4) Switch — “use YAML WiFi” vs keep NVS
+
+Useful as a Home Assistant control: turn **ON** = clear NVS (force YAML defaults on next STA attempt).
+
+```yaml
+switch:
+  - platform: template
+    name: "Force YAML WiFi (clear NVS)"
+    id: force_yaml_wifi
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - eth_wifi_fallback.clear_wifi:
+      - logger.log: "NVS cleared — YAML SSID will be used"
+    turn_off_action:
+      - logger.log: "NVS not modified"
+```
+
+### 5) Save WiFi from Home Assistant text inputs
+
+```yaml
+input_text:   # only if using HA helpers via api — or use text sensors / globals
+
+# Simpler pattern with globals + template button:
+globals:
+  - id: g_ssid
+    type: std::string
+    restore_value: no
+    initial_value: '"MySSID"'
+  - id: g_pass
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+button:
+  - platform: template
+    name: "Apply WiFi from globals"
+    on_press:
+      - eth_wifi_fallback.save_wifi:
+          ssid: !lambda return id(g_ssid);
+          password: !lambda return id(g_pass);
+```
+
+### 6) Status binary sensor (optional helper)
+
+ESPHome does not expose eth_wifi_fallback state as a built-in sensor; you can approximate with Ethernet status:
+
+```yaml
+binary_sensor:
+  - platform: status
+    name: "Node status"
+
+# Ethernet link is already reflected by the ethernet component connectivity.
 ```
 
 ---
 
-## Notes
+## Security notes
 
-- Do **not** declare the official `wifi:` component together with `ethernet:`.
-- This component starts WiFi at low level only when Ethernet is down.
-- Using the same IP for Ethernet and WiFi is supported; brief ping loss can occur during switch (ARP update).
-- Warning `took a long time for an operation` on WiFi start is normal (blocking init ~100 ms).
-- Tested with ESPHome 2026.7.x / ESP32 + LAN8720 (HEUNGELECTRIC board).
+- The config portal is **not** started when Ethernet or WiFi STA is connected.
+- Anyone who can join the rescue AP can change WiFi credentials — set a strong `ap_password` in production if needed.
+- Prefer `api:` encryption and OTA password as usual.
 
 ---
 
-## License
+## Troubleshooting
 
-Use freely. Attribution appreciated.
+| Symptom | Cause / fix |
+|---------|-------------|
+| `DHCP server start failed` | Set `enable_lwip_dhcp_server: true` and **clean build** |
+| `httpd error in listen (112)` | Port 80 used by `web_server` — portal uses **8080**; open URL from log |
+| Phone connects AP but page timeout | Disable mobile data; try `http://192.168.4.1:8080/` |
+| Blank page on `:80` | That is ESPHome `web_server`, not the portal |
+| STA never connects | Check NVS SSID/password; use **Clear NVS** button and retry |
+| Ethernet flapping in log | Cable/PHY issue; fallback still works on WiFi |
+
+---
+
+## Actions reference
+
+```yaml
+# Save credentials to NVS and switch to STA (if WiFi already active)
+- eth_wifi_fallback.save_wifi:
+    ssid: "NewSSID"
+    password: "NewPassword"
+
+# Erase NVS → next STA attempt uses YAML ssid/password
+- eth_wifi_fallback.clear_wifi:
+```
+
+---
+
+## License / credit
+
+Based on ideas from [kemak92/eth_wifi_fallback](https://github.com/kemak92/eth_wifi_fallback).  
+SoftAP + NVS + config portal extensions — heungelectric, 2026.
