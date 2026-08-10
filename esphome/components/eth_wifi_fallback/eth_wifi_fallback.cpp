@@ -106,13 +106,14 @@ void EthWifiFallback::loop() {
         ESP_LOGI(TAG, "WiFi STA connected");
         this->log_sta_ip_();
         this->state_ = FallbackState::STA_ACTIVE;
-        this->start_http_server_();
+        // Security: /wifi config page ONLY on rescue AP, never on STA/LAN
+        this->stop_http_server_();
       } else if (now - this->state_enter_time_ > this->sta_timeout_) {
         ESP_LOGW(TAG, "STA timeout → starting AP");
         this->stop_wifi_();
         this->state_ = FallbackState::AP_ACTIVE;
         this->state_enter_time_ = now;
-        this->start_ap_();  // starts AP + DHCP + HTTP + scan immediately
+        this->start_ap_();  // starts AP + DHCP + HTTP (config only in AP mode)
       } else {
         esp_wifi_connect();
       }
@@ -121,7 +122,6 @@ void EthWifiFallback::loop() {
     case FallbackState::STA_ACTIVE:
       if (!this->is_sta_connected_()) {
         ESP_LOGW(TAG, "STA lost → restart STA timeout (then AP if still fail)");
-        this->stop_http_server_();
         this->state_ = FallbackState::STARTING_STA;
         this->state_enter_time_ = now;
         esp_wifi_connect();
